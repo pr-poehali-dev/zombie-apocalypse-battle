@@ -7,6 +7,7 @@ import { BrowserRouter, Routes, Route } from "react-router-dom";
 import Index from "./pages/Index";
 import Burlak from "./pages/Burlak";
 import Azimut from "./pages/Azimut";
+import Elysium from "./pages/Elysium";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -21,6 +22,7 @@ const App = () => (
           <Route path="/" element={<Index />} />
           <Route path="/burlak" element={<Burlak />} />
           <Route path="/azimut" element={<Azimut />} />
+          <Route path="/elysium" element={<Elysium />} />
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
           <Route path="*" element={<NotFound />} />
         </Routes>
