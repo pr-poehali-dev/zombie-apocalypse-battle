@@ -1,846 +1,750 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 
-const BG_URL = "https://cdn.poehali.dev/projects/5be54ed1-a7a9-40fa-a808-f245193e3bf9/files/f8383550-7c8b-4dd2-95a6-2637b7f9131c.jpg";
+const BG_URL = "https://cdn.poehali.dev/projects/5be54ed1-a7a9-40fa-a808-f245193e3bf9/files/52dbf1a1-daaf-4ada-afd2-0a6d7e8cec83.jpg";
 
-// --- Game Constants ---
-const CANVAS_W = 390;
-const CANVAS_H = 700;
-const PLAYER_Y = CANVAS_H - 120;
-const PLAYER_SIZE = 28;
-const ZOMBIE_SIZE = 26;
-const BULLET_SIZE = 5;
-const BULLET_SPEED = 10;
+// ── Canvas dimensions ──
+const CW = 420;
+const CH = 700;
 
-const WEAPONS = [
-  { id: "pistol", name: "Пистолет", emoji: "🔫", damage: 25, fireRate: 500, ammo: 30, maxAmmo: 30, bulletColor: "#FFD700", spread: 0, pellets: 1, upgradeCost: 0 },
-  { id: "shotgun", name: "Дробовик", emoji: "💥", damage: 40, fireRate: 900, ammo: 15, maxAmmo: 15, bulletColor: "#FF6B00", spread: 0.3, pellets: 5, upgradeCost: 150 },
-  { id: "ak47", name: "АК-47", emoji: "⚡", damage: 18, fireRate: 120, ammo: 45, maxAmmo: 45, bulletColor: "#00FFFF", spread: 0.08, pellets: 1, upgradeCost: 300 },
-];
+// ── Unique id ──
+let _uid = 0;
+const uid = () => ++_uid;
 
-type Bullet = { x: number; y: number; vx: number; vy: number; damage: number; color: string; id: number };
-type Zombie = { x: number; y: number; hp: number; maxHp: number; speed: number; id: number; type: string; hit: number };
-type Particle = { x: number; y: number; vx: number; vy: number; life: number; color: string; size: number; id: number };
-type FloatingText = { x: number; y: number; text: string; life: number; color: string; id: number };
+// ── Types ──
+type Vec2 = { x: number; y: number };
+type Entity = Vec2 & { id: number };
 
-let _id = 0;
-const uid = () => ++_id;
+type Player = Entity & {
+  vx: number; vy: number;
+  hp: number; maxHp: number;
+  stamina: number;
+  invincible: number;
+  dashCd: number;
+  kills: number;
+  money: number;
+  weapon: "knife" | "gun";
+  ammo: number;
+  maxAmmo: number;
+  reloading: number;
+  angle: number;
+};
 
-function drawRoundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.lineTo(x + w - r, y);
-  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
-  ctx.lineTo(x + w, y + h - r);
-  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
-  ctx.lineTo(x + r, y + h);
-  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
-  ctx.lineTo(x, y + r);
-  ctx.quadraticCurveTo(x, y, x + r, y);
-  ctx.closePath();
+type Cop = Entity & {
+  vx: number; vy: number;
+  hp: number; maxHp: number;
+  type: "rookie" | "officer" | "swat";
+  state: "chase" | "shoot" | "stun";
+  stunTimer: number;
+  shootCd: number;
+  hitFlash: number;
+};
+
+type Bullet = Entity & { vx: number; vy: number; fromPlayer: boolean; dmg: number; life: number };
+type Particle = Entity & { vx: number; vy: number; life: number; maxLife: number; color: string; size: number; type: "blood" | "spark" | "smoke" };
+type FloatText = Entity & { text: string; vy: number; life: number; color: string };
+type Obstacle = { x: number; y: number; w: number; h: number; color: string };
+
+// ── Building / obstacle layouts ──
+const OBSTACLE_COLORS = ["#1a1a2e", "#16213e", "#0f3460", "#1a0a2e", "#0d0d1a"];
+
+function makeObstacles(offsetY: number): Obstacle[] {
+  const obs: Obstacle[] = [];
+  obs.push({ x: 0, y: offsetY, w: 70, h: 120 + Math.random() * 80, color: OBSTACLE_COLORS[Math.floor(Math.random() * OBSTACLE_COLORS.length)] });
+  obs.push({ x: CW - 75, y: offsetY, w: 75, h: 100 + Math.random() * 100, color: OBSTACLE_COLORS[Math.floor(Math.random() * OBSTACLE_COLORS.length)] });
+  if (Math.random() > 0.5) {
+    obs.push({ x: 80 + Math.random() * (CW - 200), y: offsetY + 60, w: 38, h: 22, color: "#2a0a0a" });
+  }
+  return obs;
 }
 
+// ── Neon signs ──
+const SIGNS = ["РЕСТОРАН", "КАЗИНО", "ОТЕЛЬ", "БАР", "НОЧНОЙ", "КАБАРЕ", "ЛОМБАРД", "АПТЕКА"];
+type Sign = { x: number; y: number; text: string; color: string; blink: number };
+
+function makeSign(y: number): Sign {
+  const colors = ["#ff0044", "#00ffcc", "#ff6600", "#cc00ff", "#ffcc00", "#0088ff"];
+  return { x: 5 + Math.random() * (CW - 90), y, text: SIGNS[Math.floor(Math.random() * SIGNS.length)], color: colors[Math.floor(Math.random() * colors.length)], blink: Math.random() * Math.PI * 2 };
+}
+
+// ── Cops config ──
+const COP_CONFIGS = {
+  rookie:  { hp: 60,  speed: 1.3, shootRange: 180, shootCd: 1800, dmg: 8,  color: "#3a7aff", hatColor: "#1144cc", reward: 50 },
+  officer: { hp: 100, speed: 1.6, shootRange: 220, shootCd: 1200, dmg: 14, color: "#1a5aff", hatColor: "#0033aa", reward: 100 },
+  swat:    { hp: 200, speed: 1.1, shootRange: 280, shootCd: 900,  dmg: 22, color: "#111",    hatColor: "#000",    reward: 200 },
+};
+
+// ── Helpers ──
+function circleRect(cx: number, cy: number, cr: number, rx: number, ry: number, rw: number, rh: number) {
+  const nearX = Math.max(rx, Math.min(cx, rx + rw));
+  const nearY = Math.max(ry, Math.min(cy, ry + rh));
+  const dx = cx - nearX, dy = cy - nearY;
+  return dx * dx + dy * dy < cr * cr;
+}
+
+function dist(a: Vec2, b: Vec2) {
+  const dx = a.x - b.x, dy = a.y - b.y;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+function normalize(dx: number, dy: number) {
+  const d = Math.sqrt(dx * dx + dy * dy) || 1;
+  return { x: dx / d, y: dy / d };
+}
+
+// ── Draw player ──
+function drawPlayer(ctx: CanvasRenderingContext2D, p: Player, sy: number) {
+  const sx = p.x, py2 = p.y - sy;
+  const flash = p.invincible > 0 && Math.floor(p.invincible / 80) % 2 === 0;
+  if (flash) return;
+  ctx.save();
+  ctx.translate(sx, py2);
+  ctx.rotate(p.angle + Math.PI / 2);
+  ctx.shadowColor = "#ff003388";
+  ctx.shadowBlur = 20;
+  const coat = ctx.createRadialGradient(0, 0, 2, 0, 0, 20);
+  coat.addColorStop(0, "#2a2a2a");
+  coat.addColorStop(1, "#111");
+  ctx.fillStyle = coat;
+  ctx.beginPath();
+  ctx.ellipse(0, 2, 14, 18, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#1a1a1a";
+  ctx.beginPath();
+  ctx.moveTo(-6, -10); ctx.lineTo(0, -5); ctx.lineTo(6, -10);
+  ctx.lineTo(4, -18); ctx.lineTo(0, -14); ctx.lineTo(-4, -18);
+  ctx.closePath(); ctx.fill();
+  ctx.shadowBlur = 0;
+  const headGrad = ctx.createRadialGradient(-2, -22, 1, 0, -22, 10);
+  headGrad.addColorStop(0, "#c8956a");
+  headGrad.addColorStop(1, "#7a5035");
+  ctx.fillStyle = headGrad;
+  ctx.beginPath(); ctx.arc(0, -22, 9, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#0a0a0a";
+  ctx.fillRect(-10, -34, 20, 5);
+  ctx.beginPath(); ctx.ellipse(0, -34, 8, 4, 0, 0, Math.PI * 2); ctx.fill();
+  if (p.weapon === "knife") {
+    ctx.strokeStyle = "#ddd"; ctx.lineWidth = 2;
+    ctx.shadowColor = "#ffffff88"; ctx.shadowBlur = 6;
+    ctx.beginPath(); ctx.moveTo(10, -8); ctx.lineTo(22, -20); ctx.stroke();
+  } else {
+    ctx.fillStyle = "#333"; ctx.shadowColor = "#ff880088"; ctx.shadowBlur = 8;
+    ctx.fillRect(8, -5, 18, 7);
+  }
+  ctx.restore();
+}
+
+// ── Draw cop ──
+function drawCop(ctx: CanvasRenderingContext2D, c: Cop, sy: number) {
+  const cx2 = c.x, cy2 = c.y - sy;
+  const cfg = COP_CONFIGS[c.type];
+  ctx.save();
+  ctx.translate(cx2, cy2);
+  ctx.shadowColor = cfg.color;
+  ctx.shadowBlur = c.hitFlash > 0 ? 24 : 8;
+  const bodyGrad = ctx.createRadialGradient(0, 0, 2, 0, 0, 15);
+  bodyGrad.addColorStop(0, c.hitFlash > 0 ? "#ff4444" : cfg.color);
+  bodyGrad.addColorStop(1, cfg.hatColor);
+  ctx.fillStyle = bodyGrad;
+  ctx.beginPath(); ctx.ellipse(0, 3, 12, 16, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = c.type === "swat" ? "#222" : "#c89060";
+  ctx.beginPath(); ctx.arc(0, -18, 8, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = cfg.hatColor;
+  if (c.type === "swat") {
+    ctx.beginPath(); ctx.arc(0, -20, 10, Math.PI, 0); ctx.fill();
+  } else {
+    ctx.fillRect(-9, -28, 18, 5);
+    ctx.beginPath(); ctx.ellipse(0, -28, 7, 3, 0, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.fillStyle = "#ffdd00"; ctx.shadowColor = "#ffdd00"; ctx.shadowBlur = 4;
+  ctx.beginPath(); ctx.arc(-4, 0, 3, 0, Math.PI * 2); ctx.fill();
+  ctx.shadowBlur = 0;
+  const bw = 30, bh = 4;
+  ctx.fillStyle = "rgba(0,0,0,0.5)";
+  ctx.fillRect(-bw / 2, -34, bw, bh);
+  ctx.fillStyle = c.hp / c.maxHp > 0.5 ? "#00ff88" : c.hp / c.maxHp > 0.25 ? "#ffaa00" : "#ff2200";
+  ctx.fillRect(-bw / 2, -34, bw * (c.hp / c.maxHp), bh);
+  ctx.restore();
+}
+
+// ── Main component ──
 export default function Index() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const bgRef = useRef<HTMLImageElement | null>(null);
-  const stateRef = useRef({
-    phase: "menu" as "menu" | "playing" | "gameover" | "shop",
-    player: { x: CANVAS_W / 2, hp: 100, maxHp: 100 },
+  const bgImgRef = useRef<HTMLImageElement | null>(null);
+  const animRef = useRef(0);
+  const lastRef = useRef(0);
+
+  const [screen, setScreen] = useState<"menu" | "playing" | "dead">("menu");
+  const [hud, setHud] = useState({ hp: 100, maxHp: 100, ammo: 6, maxAmmo: 6, reloading: false, stamina: 100, wave: 1, money: 0, kills: 0, weapon: "knife" as "knife" | "gun", wantedLevel: 1 });
+
+  const G = useRef({
+    player: null as unknown as Player,
+    cops: [] as Cop[],
     bullets: [] as Bullet[],
-    zombies: [] as Zombie[],
     particles: [] as Particle[],
-    floatingTexts: [] as FloatingText[],
+    floats: [] as FloatText[],
+    obstacles: [] as Obstacle[],
+    signs: [] as Sign[],
+    scrollY: 0,
+    chunkY: 0,
     wave: 1,
-    score: 0,
-    coins: 0,
-    kills: 0,
-    waveKills: 0,
-    waveTotal: 0,
-    waveActive: false,
     waveTimer: 0,
-    lastShot: 0,
-    currentWeapon: 0,
-    weapons: WEAPONS.map(w => ({ ...w })),
-    unlockedWeapons: [0],
-    upgrades: { damage: 0, fireRate: 0, ammo: 0 },
-    touching: false,
-    touchX: CANVAS_W / 2,
-    autoFire: false,
     spawnQueue: 0,
     spawnTimer: 0,
-    frameCount: 0,
-    shopTab: "weapons" as "weapons" | "upgrades",
+    frameN: 0,
+    keys: {} as Record<string, boolean>,
+    touch: { active: false, x: CW / 2, y: CH / 2, startX: 0, startY: 0 },
+    rain: Array.from({ length: 60 }, () => ({ x: Math.random() * CW, y: Math.random() * CH, speed: 8 + Math.random() * 6, len: 10 + Math.random() * 15 })),
+    wantedLevel: 1,
+    screenRef: "menu" as "menu" | "playing" | "dead",
   });
 
-  const [uiState, setUiState] = useState({
-    phase: "menu" as "menu" | "playing" | "gameover" | "shop",
-    hp: 100,
-    maxHp: 100,
-    ammo: 30,
-    maxAmmo: 30,
-    score: 0,
-    coins: 0,
-    wave: 1,
-    waveActive: false,
-    waveKills: 0,
-    waveTotal: 0,
-    weaponName: "Пистолет",
-    weaponEmoji: "🔫",
-    kills: 0,
-    shopTab: "weapons" as "weapons" | "upgrades",
-    unlockedWeapons: [0],
-    currentWeapon: 0,
-    upgrades: { damage: 0, fireRate: 0, ammo: 0 },
-  });
-
-  const animRef = useRef<number>(0);
-  const lastTimeRef = useRef(0);
-
-  const syncUI = useCallback(() => {
-    const s = stateRef.current;
-    const w = s.weapons[s.currentWeapon];
-    setUiState({
-      phase: s.phase,
-      hp: s.player.hp,
-      maxHp: s.player.maxHp,
-      ammo: w.ammo,
-      maxAmmo: w.maxAmmo,
-      score: s.score,
-      coins: s.coins,
-      wave: s.wave,
-      waveActive: s.waveActive,
-      waveKills: s.waveKills,
-      waveTotal: s.waveTotal,
-      weaponName: w.name,
-      weaponEmoji: w.emoji,
-      kills: s.kills,
-      shopTab: s.shopTab,
-      unlockedWeapons: [...s.unlockedWeapons],
-      currentWeapon: s.currentWeapon,
-      upgrades: { ...s.upgrades },
-    });
-  }, []);
-
-  const spawnParticles = (x: number, y: number, color: string, count = 6) => {
-    const s = stateRef.current;
-    for (let i = 0; i < count; i++) {
-      const angle = Math.random() * Math.PI * 2;
-      const speed = 1 + Math.random() * 3;
-      s.particles.push({ x, y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed, life: 1, color, size: 2 + Math.random() * 4, id: uid() });
+  const fillWorld = useCallback(() => {
+    const g = G.current;
+    while (g.chunkY > g.scrollY - CH * 2) {
+      g.obstacles.push(...makeObstacles(g.chunkY - CH));
+      g.signs.push(makeSign(g.chunkY - CH * 0.3));
+      g.chunkY -= CH;
     }
-  };
-
-  const addFloating = (x: number, y: number, text: string, color = "#FFD700") => {
-    stateRef.current.floatingTexts.push({ x, y, text, life: 1, color, id: uid() });
-  };
-
-  const shoot = useCallback((now: number) => {
-    const s = stateRef.current;
-    if (s.phase !== "playing") return;
-    const w = s.weapons[s.currentWeapon];
-    if (now - s.lastShot < w.fireRate) return;
-    if (w.ammo <= 0) { addFloating(s.player.x, PLAYER_Y - 40, "Перезарядка!", "#FF4444"); return; }
-    s.lastShot = now;
-    w.ammo--;
-
-    for (let p = 0; p < w.pellets; p++) {
-      const spread = (Math.random() - 0.5) * w.spread;
-      s.bullets.push({ x: s.player.x, y: PLAYER_Y - 20, vx: spread * BULLET_SPEED, vy: -BULLET_SPEED, damage: w.damage * (1 + s.upgrades.damage * 0.2), color: w.bulletColor, id: uid() });
-    }
+    g.obstacles = g.obstacles.filter(o => o.y - g.scrollY < CH + 200);
+    g.signs = g.signs.filter(s => s.y - g.scrollY < CH + 100);
   }, []);
 
-  const startWave = useCallback(() => {
-    const s = stateRef.current;
-    const zombieCount = 5 + s.wave * 3;
-    s.waveActive = true;
-    s.waveKills = 0;
-    s.waveTotal = zombieCount;
-    s.spawnQueue = zombieCount;
-    s.spawnTimer = 0;
-    s.frameCount = 0;
+  const spawnWave = useCallback((wave: number) => {
+    const g = G.current;
+    g.spawnQueue = 3 + wave * 2;
+    g.spawnTimer = 0;
   }, []);
 
-  const spawnZombie = useCallback(() => {
-    const s = stateRef.current;
-    const types = ["normal", "fast", "tank"];
-    const weights = s.wave < 3 ? [0.8, 0.2, 0] : s.wave < 6 ? [0.5, 0.3, 0.2] : [0.3, 0.4, 0.3];
+  const spawnCop = useCallback(() => {
+    const g = G.current;
+    const wave = g.wave;
+    let type: Cop["type"] = "rookie";
     const r = Math.random();
-    let type = "normal";
-    if (r > weights[0] + weights[1]) type = "tank";
-    else if (r > weights[0]) type = "fast";
-
-    const configs: Record<string, { hp: number; speed: number }> = {
-      normal: { hp: 40 + s.wave * 10, speed: 0.5 + s.wave * 0.05 },
-      fast: { hp: 25 + s.wave * 5, speed: 1.2 + s.wave * 0.08 },
-      tank: { hp: 120 + s.wave * 20, speed: 0.3 + s.wave * 0.03 },
-    };
-    const cfg = configs[type];
-    const side = Math.random() < 0.3;
-    const x = side ? (Math.random() < 0.5 ? -ZOMBIE_SIZE : CANVAS_W + ZOMBIE_SIZE) : Math.random() * (CANVAS_W - 40) + 20;
-    const y = side ? Math.random() * (CANVAS_H * 0.4) : -ZOMBIE_SIZE;
-
-    s.zombies.push({ x, y, hp: cfg.hp, maxHp: cfg.hp, speed: cfg.speed, id: uid(), type, hit: 0 });
+    if (wave >= 5 && r < 0.3) type = "swat";
+    else if (wave >= 3 && r < 0.5) type = "officer";
+    const cfg = COP_CONFIGS[type];
+    const side = Math.random();
+    let sx = 100 + Math.random() * (CW - 200);
+    let sy = g.scrollY - 40;
+    if (side < 0.2) { sx = -20; sy = g.scrollY + Math.random() * CH * 0.5; }
+    if (side > 0.8) { sx = CW + 20; sy = g.scrollY + Math.random() * CH * 0.5; }
+    g.cops.push({ id: uid(), x: sx, y: sy, vx: 0, vy: 0, hp: cfg.hp, maxHp: cfg.hp, type, state: "chase", stunTimer: 0, shootCd: 0, hitFlash: 0 });
   }, []);
 
-  const gameLoop = useCallback((timestamp: number) => {
-    const dt = Math.min(timestamp - lastTimeRef.current, 50);
-    lastTimeRef.current = timestamp;
-    const s = stateRef.current;
-    const canvas = canvasRef.current;
-    if (!canvas) { animRef.current = requestAnimationFrame(gameLoop); return; }
-    const ctx = canvas.getContext("2d")!;
-
-    ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
-
-    if (bgRef.current) {
-      ctx.globalAlpha = 0.7;
-      ctx.drawImage(bgRef.current, 0, 0, CANVAS_W, CANVAS_H);
-      ctx.globalAlpha = 1;
-    } else {
-      const grad = ctx.createLinearGradient(0, 0, 0, CANVAS_H);
-      grad.addColorStop(0, "#0a0005");
-      grad.addColorStop(0.6, "#1a0510");
-      grad.addColorStop(1, "#0d0008");
-      ctx.fillStyle = grad;
-      ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+  const splat = useCallback((x: number, y: number, color: string, n = 8, type: Particle["type"] = "blood") => {
+    const g = G.current;
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = 1 + Math.random() * 4;
+      g.particles.push({ id: uid(), x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life: 1, maxLife: 1, color, size: 2 + Math.random() * 5, type });
     }
+  }, []);
 
-    // Fog overlay
-    const fog = ctx.createLinearGradient(0, CANVAS_H * 0.5, 0, CANVAS_H);
-    fog.addColorStop(0, "rgba(0,0,0,0)");
-    fog.addColorStop(1, "rgba(0,0,0,0.6)");
-    ctx.fillStyle = fog;
-    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+  const floatText = useCallback((x: number, y: number, text: string, color = "#fff") => {
+    G.current.floats.push({ id: uid(), x, y, text, vy: -1.2, life: 1, color });
+  }, []);
 
-    if (s.phase === "menu" || s.phase === "shop" || s.phase === "gameover") {
-      animRef.current = requestAnimationFrame(gameLoop);
-      return;
-    }
-
-    s.frameCount++;
-
-    // Spawn zombies
-    if (s.waveActive && s.spawnQueue > 0) {
-      s.spawnTimer += dt;
-      const spawnInterval = Math.max(400, 1200 - s.wave * 50);
-      if (s.spawnTimer >= spawnInterval) {
-        spawnZombie();
-        s.spawnQueue--;
-        s.spawnTimer = 0;
-      }
-    }
-
-    // Auto fire
-    if (s.autoFire && s.touching) shoot(timestamp);
-
-    // Move bullets
-    s.bullets = s.bullets.filter(b => b.y > -20 && b.x > -20 && b.x < CANVAS_W + 20);
-    for (const b of s.bullets) { b.x += b.vx; b.y += b.vy; }
-
-    // Move zombies
-    for (const z of s.zombies) {
-      if (z.hit > 0) z.hit -= dt;
-      const dx = s.player.x - z.x;
-      const dy = PLAYER_Y - z.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      if (dist > 5) {
-        z.x += (dx / dist) * z.speed * (dt / 16);
-        z.y += (dy / dist) * z.speed * (dt / 16);
-      }
-      // Attack player
-      if (dist < PLAYER_SIZE + ZOMBIE_SIZE - 10) {
-        s.player.hp -= (z.type === "tank" ? 0.15 : z.type === "fast" ? 0.08 : 0.1) * (dt / 16);
-        if (s.player.hp <= 0) {
-          s.phase = "gameover";
-          syncUI();
-        }
-      }
-    }
-
-    // Bullet-Zombie collision
-    const bulletsToRemove = new Set<number>();
-    const zombiesToRemove = new Set<number>();
-
-    for (const b of s.bullets) {
-      for (const z of s.zombies) {
-        if (zombiesToRemove.has(z.id)) continue;
-        const dx = b.x - z.x;
-        const dy = b.y - z.y;
-        if (dx * dx + dy * dy < (BULLET_SIZE + ZOMBIE_SIZE) ** 2) {
-          z.hp -= b.damage;
-          z.hit = 200;
-          bulletsToRemove.add(b.id);
-          spawnParticles(z.x, z.y, "#8B0000", 4);
-          if (z.hp <= 0) {
-            zombiesToRemove.add(z.id);
-            const reward = z.type === "tank" ? 30 : z.type === "fast" ? 15 : 10;
-            const pts = z.type === "tank" ? 50 : z.type === "fast" ? 30 : 20;
-            s.coins += reward;
-            s.score += pts;
-            s.kills++;
-            s.waveKills++;
-            spawnParticles(z.x, z.y, "#FF2200", 12);
-            addFloating(z.x, z.y - 20, `+${pts}`, "#FFD700");
+  const playerAttack = useCallback(() => {
+    const g = G.current;
+    const p = g.player;
+    if (!p || g.screenRef !== "playing") return;
+    if (p.weapon === "knife") {
+      for (const c of g.cops) {
+        if (dist(p, c) < 55) {
+          const dmg = 30 + g.wave * 5;
+          c.hp -= dmg;
+          c.hitFlash = 200;
+          c.state = "stun"; c.stunTimer = 400;
+          splat(c.x, c.y, "#cc0000", 10);
+          floatText(c.x, c.y - 20, `-${dmg}`, "#ff4444");
+          if (c.hp <= 0) {
+            p.kills++;
+            p.money += COP_CONFIGS[c.type].reward;
+            splat(c.x, c.y, "#880000", 20);
+            floatText(c.x, c.y - 30, `+$${COP_CONFIGS[c.type].reward}`, "#ffcc00");
           }
-          break;
+        }
+      }
+      g.cops = g.cops.filter(c => c.hp > 0);
+      splat(p.x + Math.cos(p.angle) * 40, p.y + Math.sin(p.angle) * 40, "#cc0000", 5, "spark");
+    } else {
+      if (p.ammo <= 0 || p.reloading > 0) {
+        floatText(p.x, p.y - 30, "ПЕРЕЗАРЯДКА!", "#ffaa00");
+        return;
+      }
+      p.ammo--;
+      const dx = Math.cos(p.angle), dy = Math.sin(p.angle);
+      g.bullets.push({ id: uid(), x: p.x + dx * 20, y: p.y + dy * 20, vx: dx * 12, vy: dy * 12, fromPlayer: true, dmg: 25 + g.wave * 3, life: 1 });
+      splat(p.x + dx * 25, p.y + dy * 25, "#ffcc00", 4, "spark");
+      if (p.ammo === 0) p.reloading = 2000;
+    }
+  }, [splat, floatText]);
+
+  const loop = useCallback((ts: number) => {
+    const dt = Math.min(ts - lastRef.current, 50);
+    lastRef.current = ts;
+    const g = G.current;
+    const canvas = canvasRef.current;
+    if (!canvas) { animRef.current = requestAnimationFrame(loop); return; }
+    const ctx = canvas.getContext("2d")!;
+    const p = g.player;
+
+    g.frameN++;
+
+    if (p && g.screenRef === "playing") {
+      g.scrollY = p.y - CH * 0.6;
+      fillWorld();
+    }
+
+    // ── PLAYER MOVEMENT ──
+    if (p && g.screenRef === "playing") {
+      let mx = 0, my = 0;
+      if (g.keys["ArrowLeft"] || g.keys["a"]) mx -= 1;
+      if (g.keys["ArrowRight"] || g.keys["d"]) mx += 1;
+      if (g.keys["ArrowUp"] || g.keys["w"]) my -= 1;
+      if (g.keys["ArrowDown"] || g.keys["s"]) my += 1;
+
+      if (g.touch.active) {
+        const dx = g.touch.x - g.touch.startX;
+        const dy = g.touch.y - g.touch.startY;
+        const m = Math.sqrt(dx * dx + dy * dy);
+        if (m > 10) { mx = dx / m; my = dy / m; }
+      }
+
+      const spd = 2.8 * (dt / 16);
+      p.vx = mx * spd; p.vy = my * spd;
+      if (mx !== 0 || my !== 0) p.angle = Math.atan2(my, mx) - Math.PI / 2;
+
+      if (g.cops.length > 0) {
+        let nearest = g.cops[0], nd = dist(p, nearest);
+        for (const c of g.cops) { const d2 = dist(p, c); if (d2 < nd) { nd = d2; nearest = c; } }
+        p.angle = Math.atan2(nearest.y - p.y, nearest.x - p.x);
+      }
+
+      const nx = p.x + p.vx, ny = p.y + p.vy;
+      let blocked = false;
+      for (const o of g.obstacles) { if (circleRect(nx, ny, 14, o.x, o.y, o.w, o.h)) { blocked = true; break; } }
+      if (!blocked) { p.x = Math.max(14, Math.min(CW - 14, nx)); p.y = ny; }
+      else {
+        const bx2 = p.x + p.vx;
+        if (!g.obstacles.some(o => circleRect(bx2, p.y, 14, o.x, o.y, o.w, o.h))) p.x = Math.max(14, Math.min(CW - 14, bx2));
+        const by2 = p.y + p.vy;
+        if (!g.obstacles.some(o => circleRect(p.x, by2, 14, o.x, o.y, o.w, o.h))) p.y = by2;
+      }
+
+      if (g.keys[" "] || g.keys["f"] || g.keys["e"]) { if (g.frameN % 12 === 0) playerAttack(); }
+      if (p.invincible > 0) p.invincible -= dt;
+      if (p.reloading > 0) { p.reloading -= dt; if (p.reloading <= 0) { p.reloading = 0; p.ammo = p.maxAmmo; } }
+    }
+
+    // ── WAVE LOGIC ──
+    if (p && g.screenRef === "playing") {
+      g.waveTimer += dt;
+      if (g.spawnQueue > 0) {
+        g.spawnTimer += dt;
+        if (g.spawnTimer > Math.max(600, 1500 - g.wave * 80)) { spawnCop(); g.spawnQueue--; g.spawnTimer = 0; }
+      }
+      if (g.spawnQueue === 0 && g.cops.length === 0 && g.waveTimer > 2000) {
+        g.wave++;
+        g.wantedLevel = Math.min(5, Math.ceil(g.wave / 2));
+        spawnWave(g.wave);
+        g.waveTimer = 0;
+        floatText(CW / 2, CH * 0.4 + g.scrollY, `★ ВОЛНА ${g.wave}`, "#ffcc00");
+      }
+    }
+
+    // ── COP AI ──
+    if (p && g.screenRef === "playing") {
+      for (const c of g.cops) {
+        if (c.hitFlash > 0) c.hitFlash -= dt;
+        if (c.state === "stun") { c.stunTimer -= dt; if (c.stunTimer <= 0) c.state = "chase"; continue; }
+        const cfg = COP_CONFIGS[c.type];
+        const d = dist(c, p);
+        if (d < cfg.shootRange && d > 50) {
+          c.state = "shoot";
+          const n = normalize(p.x - c.x, p.y - c.y);
+          c.vx = n.x * 0.5; c.vy = n.y * 0.5;
+          c.shootCd -= dt;
+          if (c.shootCd <= 0) {
+            c.shootCd = cfg.shootCd;
+            const spread = (Math.random() - 0.5) * 0.25;
+            const a = Math.atan2(p.y - c.y, p.x - c.x) + spread;
+            g.bullets.push({ id: uid(), x: c.x, y: c.y, vx: Math.cos(a) * 9, vy: Math.sin(a) * 9, fromPlayer: false, dmg: cfg.dmg, life: 1 });
+          }
+        } else {
+          c.state = "chase";
+          const n = normalize(p.x - c.x, p.y - c.y);
+          const spd = cfg.speed * (dt / 16);
+          c.vx = n.x * spd; c.vy = n.y * spd;
+          if (d < 35 && p.invincible <= 0) {
+            p.hp -= cfg.dmg * 0.05 * (dt / 16);
+            p.invincible = 300;
+            splat(p.x, p.y, "#cc0000", 6);
+            if (p.hp <= 0) { g.screenRef = "dead"; setScreen("dead"); }
+          }
+        }
+        const ncx = c.x + c.vx, ncy = c.y + c.vy;
+        if (!g.obstacles.some(o => circleRect(ncx, ncy, 13, o.x, o.y, o.w, o.h))) { c.x = ncx; c.y = ncy; }
+      }
+    }
+
+    // ── BULLETS ──
+    if (g.screenRef === "playing") {
+      for (const b of g.bullets) { b.x += b.vx * (dt / 16); b.y += b.vy * (dt / 16); b.life -= 0.008 * (dt / 16); }
+      const deadBullets = new Set<number>(), deadCops = new Set<number>();
+      for (const b of g.bullets) {
+        if (!b.fromPlayer || !p) continue;
+        for (const c of g.cops) {
+          if (deadCops.has(c.id)) continue;
+          if (dist(b, c) < 18) {
+            c.hp -= b.dmg; c.hitFlash = 200; c.state = "stun"; c.stunTimer = 200;
+            deadBullets.add(b.id);
+            splat(c.x, c.y, "#cc0000", 6);
+            floatText(c.x, c.y - 20, `-${b.dmg}`, "#ff4444");
+            if (c.hp <= 0) { deadCops.add(c.id); p.kills++; p.money += COP_CONFIGS[c.type].reward; splat(c.x, c.y, "#880000", 16); floatText(c.x, c.y - 35, `+$${COP_CONFIGS[c.type].reward}`, "#ffcc00"); }
+            break;
+          }
+        }
+      }
+      for (const b of g.bullets) {
+        if (b.fromPlayer || !p) continue;
+        if (dist(b, p) < 16 && p.invincible <= 0) {
+          p.hp -= b.dmg; p.invincible = 500; deadBullets.add(b.id);
+          splat(p.x, p.y, "#cc0000", 8);
+          floatText(p.x, p.y - 20, `-${b.dmg}`, "#ff6666");
+          if (p.hp <= 0) { g.screenRef = "dead"; setScreen("dead"); }
+        }
+      }
+      for (const b of g.bullets) { if (g.obstacles.some(o => circleRect(b.x, b.y, 6, o.x, o.y, o.w, o.h))) { deadBullets.add(b.id); splat(b.x, b.y, "#888", 3, "spark"); } }
+      g.bullets = g.bullets.filter(b => !deadBullets.has(b.id) && b.life > 0);
+      g.cops = g.cops.filter(c => !deadCops.has(c.id));
+    }
+
+    // ── PARTICLES / FLOATS ──
+    for (const pt of g.particles) { pt.x += pt.vx; pt.y += pt.vy; pt.vy += 0.05; pt.life -= 0.018 * (dt / 16); }
+    g.particles = g.particles.filter(pt => pt.life > 0);
+    for (const ft of g.floats) { ft.y += ft.vy; ft.life -= 0.015 * (dt / 16); }
+    g.floats = g.floats.filter(ft => ft.life > 0);
+    for (const r of g.rain) { r.y += r.speed * (dt / 16); if (r.y > CH) { r.y = -20; r.x = Math.random() * CW; } }
+
+    // ── HUD sync ──
+    if (g.frameN % 6 === 0 && p) {
+      setHud({ hp: p.hp, maxHp: p.maxHp, ammo: p.ammo, maxAmmo: p.maxAmmo, reloading: p.reloading > 0, stamina: p.stamina, wave: g.wave, money: p.money, kills: p.kills, weapon: p.weapon, wantedLevel: g.wantedLevel });
+    }
+
+    // ═══════════════════ DRAW ═══════════════════
+    ctx.clearRect(0, 0, CW, CH);
+    const sy = g.scrollY;
+
+    // Background tiled
+    if (bgImgRef.current && bgImgRef.current.complete) {
+      const imgH = bgImgRef.current.naturalHeight || CH;
+      const imgW = bgImgRef.current.naturalWidth || CW;
+      const scaledH = (imgW > 0) ? (CW / imgW) * imgH : CH;
+      const startY = (((-sy) % scaledH) + scaledH) % scaledH - scaledH;
+      for (let yy = startY; yy < CH; yy += scaledH) ctx.drawImage(bgImgRef.current, 0, yy, CW, Math.ceil(scaledH));
+    } else {
+      const bgG = ctx.createLinearGradient(0, 0, 0, CH);
+      bgG.addColorStop(0, "#04000a"); bgG.addColorStop(1, "#08001a");
+      ctx.fillStyle = bgG; ctx.fillRect(0, 0, CW, CH);
+    }
+
+    // Dark mood overlay
+    ctx.fillStyle = "rgba(2,0,10,0.55)"; ctx.fillRect(0, 0, CW, CH);
+
+    // Road center line
+    ctx.strokeStyle = "rgba(255,255,255,0.05)"; ctx.lineWidth = 2;
+    ctx.setLineDash([30, 20]); ctx.lineDashOffset = (sy * 0.8) % 50;
+    ctx.beginPath(); ctx.moveTo(CW / 2, 0); ctx.lineTo(CW / 2, CH); ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Obstacles
+    for (const o of g.obstacles) {
+      const oy = o.y - sy;
+      if (oy > CH + 50 || oy + o.h < -50) continue;
+      const oGrad = ctx.createLinearGradient(o.x, oy, o.x + o.w, oy + o.h);
+      oGrad.addColorStop(0, o.color); oGrad.addColorStop(1, "#050010");
+      ctx.fillStyle = oGrad; ctx.fillRect(o.x, oy, o.w, o.h);
+      if (o.h > 50) {
+        for (let wy = oy + 10; wy < oy + o.h - 10; wy += 18) {
+          for (let wx = o.x + 8; wx < o.x + o.w - 8; wx += 14) {
+            if ((g.frameN + wx + wy) % 7 > 2) { ctx.fillStyle = "rgba(255,200,50,0.12)"; ctx.fillRect(wx, wy, 8, 10); }
+          }
         }
       }
     }
 
-    s.bullets = s.bullets.filter(b => !bulletsToRemove.has(b.id));
-    s.zombies = s.zombies.filter(z => !zombiesToRemove.has(z.id));
-
-    // Wave complete
-    if (s.waveActive && s.spawnQueue === 0 && s.zombies.length === 0) {
-      s.waveActive = false;
-      const bonus = s.wave * 50;
-      s.coins += bonus;
-      s.score += bonus;
-      addFloating(CANVAS_W / 2, CANVAS_H / 2, `Волна ${s.wave} пройдена! +${bonus}`, "#00FF88");
-      s.wave++;
-      // Reload ammo between waves
-      for (const w of s.weapons) w.ammo = w.maxAmmo;
+    // Neon signs
+    for (const s of g.signs) {
+      const sy2 = s.y - sy;
+      if (sy2 < -30 || sy2 > CH + 30) continue;
+      const blink = Math.sin(g.frameN * 0.04 + s.blink) > 0.3 ? 1 : 0.3;
+      ctx.globalAlpha = blink;
+      ctx.font = "bold 11px 'IBM Plex Mono', monospace";
+      ctx.fillStyle = s.color; ctx.shadowColor = s.color; ctx.shadowBlur = 12;
+      ctx.fillText(s.text, s.x, sy2);
+      ctx.shadowBlur = 0; ctx.globalAlpha = 1;
     }
 
-    // Update particles
-    s.particles = s.particles.filter(p => p.life > 0);
-    for (const p of s.particles) {
-      p.x += p.vx; p.y += p.vy; p.vy += 0.05; p.life -= 0.025;
-    }
-
-    // Update floating texts
-    s.floatingTexts = s.floatingTexts.filter(t => t.life > 0);
-    for (const t of s.floatingTexts) { t.y -= 0.8; t.life -= 0.02; }
-
-    // --- DRAW ---
+    // Rain
+    ctx.strokeStyle = "rgba(130,170,255,0.18)"; ctx.lineWidth = 1;
+    for (const r of g.rain) { ctx.beginPath(); ctx.moveTo(r.x, r.y); ctx.lineTo(r.x - 1, r.y + r.len); ctx.stroke(); }
 
     // Particles
-    for (const p of s.particles) {
-      ctx.globalAlpha = p.life;
-      ctx.fillStyle = p.color;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-      ctx.fill();
+    for (const pt of g.particles) {
+      const py3 = pt.y - sy;
+      ctx.globalAlpha = pt.life; ctx.fillStyle = pt.color;
+      if (pt.type === "spark") { ctx.shadowColor = "#ffcc00"; ctx.shadowBlur = 6; }
+      ctx.beginPath(); ctx.arc(pt.x, py3, pt.size * pt.life, 0, Math.PI * 2); ctx.fill();
+      ctx.shadowBlur = 0;
     }
     ctx.globalAlpha = 1;
 
-    // Bullets
-    for (const b of s.bullets) {
-      ctx.fillStyle = b.color;
-      ctx.shadowBlur = 8;
-      ctx.shadowColor = b.color;
-      ctx.beginPath();
-      ctx.arc(b.x, b.y, BULLET_SIZE, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.shadowBlur = 0;
+    // Enemy bullets
+    for (const b of g.bullets) {
+      if (b.fromPlayer) continue;
+      const by2 = b.y - sy;
+      ctx.fillStyle = "#ffaa00"; ctx.shadowColor = "#ffaa00"; ctx.shadowBlur = 8;
+      ctx.beginPath(); ctx.arc(b.x, by2, 4, 0, Math.PI * 2); ctx.fill();
     }
-
-    // Zombies
-    for (const z of s.zombies) {
-      const isHit = z.hit > 0;
-      // Shadow
-      ctx.fillStyle = "rgba(0,0,0,0.4)";
-      ctx.beginPath();
-      ctx.ellipse(z.x, z.y + ZOMBIE_SIZE - 2, ZOMBIE_SIZE * 0.7, 5, 0, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Body
-      const bodyColor = z.type === "tank" ? (isHit ? "#FF8888" : "#5a0000") :
-        z.type === "fast" ? (isHit ? "#FFAAAA" : "#2d0040") :
-          (isHit ? "#FF9999" : "#1a2800");
-      ctx.fillStyle = bodyColor;
-      ctx.shadowBlur = isHit ? 12 : 0;
-      ctx.shadowColor = "#FF0000";
-      ctx.beginPath();
-      ctx.ellipse(z.x, z.y + 4, ZOMBIE_SIZE * 0.55, ZOMBIE_SIZE * 0.75, 0, 0, Math.PI * 2);
-      ctx.fill();
-      // Head
-      ctx.fillStyle = z.type === "tank" ? "#6b1010" : z.type === "fast" ? "#3d1050" : "#2a3d00";
-      ctx.beginPath();
-      ctx.arc(z.x, z.y - ZOMBIE_SIZE * 0.6, ZOMBIE_SIZE * 0.42, 0, Math.PI * 2);
-      ctx.fill();
-      // Eyes
-      ctx.fillStyle = "#FF0000";
-      ctx.shadowBlur = 4;
-      ctx.shadowColor = "#FF0000";
-      ctx.beginPath();
-      ctx.arc(z.x - 5, z.y - ZOMBIE_SIZE * 0.65, 3, 0, Math.PI * 2);
-      ctx.arc(z.x + 5, z.y - ZOMBIE_SIZE * 0.65, 3, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.shadowBlur = 0;
-
-      // HP bar
-      const barW = ZOMBIE_SIZE * 1.4;
-      const barX = z.x - barW / 2;
-      const barY = z.y - ZOMBIE_SIZE - 14;
-      ctx.fillStyle = "rgba(0,0,0,0.6)";
-      drawRoundRect(ctx, barX - 1, barY - 1, barW + 2, 8, 3);
-      ctx.fill();
-      const hpFrac = z.hp / z.maxHp;
-      ctx.fillStyle = hpFrac > 0.6 ? "#00FF44" : hpFrac > 0.3 ? "#FFAA00" : "#FF2200";
-      drawRoundRect(ctx, barX, barY, barW * hpFrac, 6, 3);
-      ctx.fill();
-
-      // Type badge
-      ctx.font = "10px Oswald";
-      ctx.fillStyle = z.type === "tank" ? "#FF6B6B" : z.type === "fast" ? "#CC88FF" : "#88FF88";
-      ctx.textAlign = "center";
-      ctx.fillText(z.type === "tank" ? "ТАНК" : z.type === "fast" ? "БЫСТРЫЙ" : "", z.x, barY - 3);
+    // Player bullets
+    for (const b of g.bullets) {
+      if (!b.fromPlayer) continue;
+      const by2 = b.y - sy;
+      ctx.fillStyle = "#ff4400"; ctx.shadowColor = "#ff4400"; ctx.shadowBlur = 10;
+      ctx.beginPath(); ctx.arc(b.x, by2, 5, 0, Math.PI * 2); ctx.fill();
     }
+    ctx.shadowBlur = 0;
+
+    // Cops
+    for (const c of g.cops) drawCop(ctx, c, sy);
 
     // Player
-    {
-      const px = s.player.x;
-      // Shadow
-      ctx.fillStyle = "rgba(0,0,0,0.5)";
-      ctx.beginPath();
-      ctx.ellipse(px, PLAYER_Y + PLAYER_SIZE - 4, PLAYER_SIZE * 0.7, 6, 0, 0, Math.PI * 2);
-      ctx.fill();
-      // Glow ring
-      ctx.strokeStyle = "rgba(0,200,255,0.3)";
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.ellipse(px, PLAYER_Y, PLAYER_SIZE + 4, PLAYER_SIZE + 4, 0, 0, Math.PI * 2);
-      ctx.stroke();
-      // Body
-      const bodyGrad = ctx.createRadialGradient(px - 5, PLAYER_Y - 5, 2, px, PLAYER_Y, PLAYER_SIZE);
-      bodyGrad.addColorStop(0, "#4a6fa5");
-      bodyGrad.addColorStop(1, "#1a2f4a");
-      ctx.fillStyle = bodyGrad;
-      ctx.beginPath();
-      ctx.ellipse(px, PLAYER_Y + 5, PLAYER_SIZE * 0.6, PLAYER_SIZE * 0.8, 0, 0, Math.PI * 2);
-      ctx.fill();
-      // Head
-      const headGrad = ctx.createRadialGradient(px - 4, PLAYER_Y - PLAYER_SIZE * 0.6 - 3, 2, px, PLAYER_Y - PLAYER_SIZE * 0.6, PLAYER_SIZE * 0.45);
-      headGrad.addColorStop(0, "#c5a880");
-      headGrad.addColorStop(1, "#8a6040");
-      ctx.fillStyle = headGrad;
-      ctx.beginPath();
-      ctx.arc(px, PLAYER_Y - PLAYER_SIZE * 0.6, PLAYER_SIZE * 0.45, 0, Math.PI * 2);
-      ctx.fill();
-      // Weapon
-      const w = s.weapons[s.currentWeapon];
-      ctx.font = "18px Arial";
-      ctx.textAlign = "center";
-      ctx.fillText(w.emoji, px + PLAYER_SIZE * 0.8, PLAYER_Y - 5);
+    if (p) drawPlayer(ctx, p, sy);
+
+    // Float texts
+    ctx.textAlign = "center";
+    for (const ft of g.floats) {
+      const fy = ft.y - sy;
+      if (fy < -20 || fy > CH + 20) continue;
+      ctx.globalAlpha = ft.life;
+      ctx.font = "bold 15px 'Bebas Neue', sans-serif";
+      ctx.fillStyle = ft.color; ctx.strokeStyle = "rgba(0,0,0,0.8)"; ctx.lineWidth = 3;
+      ctx.strokeText(ft.text, ft.x, fy); ctx.fillText(ft.text, ft.x, fy);
     }
+    ctx.globalAlpha = 1; ctx.textAlign = "left";
 
-    // Floating texts
-    for (const t of s.floatingTexts) {
-      ctx.globalAlpha = t.life;
-      ctx.font = "bold 16px Oswald";
-      ctx.fillStyle = t.color;
-      ctx.strokeStyle = "rgba(0,0,0,0.8)";
-      ctx.lineWidth = 3;
-      ctx.textAlign = "center";
-      ctx.strokeText(t.text, t.x, t.y);
-      ctx.fillText(t.text, t.x, t.y);
+    animRef.current = requestAnimationFrame(loop);
+  }, [fillWorld, spawnCop, spawnWave, splat, floatText, playerAttack]);
+
+  const startGame = useCallback(() => {
+    const g = G.current;
+    g.player = { id: uid(), x: CW / 2, y: 3000, vx: 0, vy: 0, hp: 100, maxHp: 100, stamina: 100, invincible: 0, dashCd: 0, kills: 0, money: 0, weapon: "knife", ammo: 6, maxAmmo: 6, reloading: 0, angle: -Math.PI / 2 };
+    g.cops = []; g.bullets = []; g.particles = []; g.floats = [];
+    g.obstacles = []; g.signs = [];
+    g.scrollY = g.player.y - CH * 0.6;
+    g.chunkY = g.scrollY + CH;
+    g.wave = 1; g.waveTimer = 0; g.wantedLevel = 1;
+    g.screenRef = "playing";
+    fillWorld(); spawnWave(1);
+    setScreen("playing");
+    setHud({ hp: 100, maxHp: 100, ammo: 6, maxAmmo: 6, reloading: false, stamina: 100, wave: 1, money: 0, kills: 0, weapon: "knife", wantedLevel: 1 });
+  }, [fillWorld, spawnWave]);
+
+  useEffect(() => {
+    const g = G.current;
+    const kd = (e: KeyboardEvent) => {
+      g.keys[e.key] = true;
+      if (e.key === "e" || e.key === "E") playerAttack();
+      if ((e.key === "q" || e.key === "Q") && g.player) g.player.weapon = g.player.weapon === "knife" ? "gun" : "knife";
+      if (e.key === "r" && g.player && g.player.weapon === "gun" && g.player.ammo < g.player.maxAmmo) g.player.reloading = 2000;
+    };
+    const ku = (e: KeyboardEvent) => { g.keys[e.key] = false; };
+    window.addEventListener("keydown", kd);
+    window.addEventListener("keyup", ku);
+    return () => { window.removeEventListener("keydown", kd); window.removeEventListener("keyup", ku); };
+  }, [playerAttack]);
+
+  const handleTouchStart = useCallback((e: React.TouchEvent<HTMLCanvasElement>) => {
+    e.preventDefault();
+    const g = G.current;
+    if (g.screenRef !== "playing") return;
+    const canvas = canvasRef.current!;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = CW / rect.width, scaleY = CH / rect.height;
+    for (const t of Array.from(e.changedTouches)) {
+      const tx = (t.clientX - rect.left) * scaleX;
+      const ty = (t.clientY - rect.top) * scaleY;
+      if (tx < CW * 0.55) { g.touch.active = true; g.touch.startX = tx; g.touch.startY = ty; g.touch.x = tx; g.touch.y = ty; }
+      else { playerAttack(); }
     }
-    ctx.globalAlpha = 1;
+  }, [playerAttack]);
 
-    // Sync UI every 10 frames
-    if (s.frameCount % 10 === 0) syncUI();
+  const handleTouchMove = useCallback((e: React.TouchEvent<HTMLCanvasElement>) => {
+    e.preventDefault();
+    const g = G.current;
+    const canvas = canvasRef.current!;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = CW / rect.width;
+    for (const t of Array.from(e.changedTouches)) {
+      const tx = (t.clientX - rect.left) * scaleX;
+      if (tx < CW * 0.55) { g.touch.x = tx; g.touch.y = (t.clientY - rect.top) * (CH / rect.height); }
+    }
+  }, []);
 
-    animRef.current = requestAnimationFrame(gameLoop);
-  }, [shoot, spawnZombie, syncUI]);
+  const handleTouchEnd = useCallback((e: React.TouchEvent<HTMLCanvasElement>) => {
+    e.preventDefault();
+    G.current.touch.active = false;
+  }, []);
 
   useEffect(() => {
     const img = new Image();
     img.src = BG_URL;
-    img.onload = () => { bgRef.current = img; };
-    animRef.current = requestAnimationFrame(gameLoop);
+    img.onload = () => { bgImgRef.current = img; };
+    animRef.current = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(animRef.current);
-  }, [gameLoop]);
+  }, [loop]);
 
-  // Touch handling
-  const handleTouchStart = useCallback((e: React.TouchEvent) => {
-    e.preventDefault();
-    const s = stateRef.current;
-    if (s.phase !== "playing") return;
-    const canvas = canvasRef.current!;
-    const rect = canvas.getBoundingClientRect();
-    const scaleX = CANVAS_W / rect.width;
-    const touch = e.touches[0];
-    s.touching = true;
-    s.touchX = (touch.clientX - rect.left) * scaleX;
-    s.player.x = Math.max(PLAYER_SIZE, Math.min(CANVAS_W - PLAYER_SIZE, s.touchX));
-    s.autoFire = true;
-    shoot(performance.now());
-  }, [shoot]);
-
-  const handleTouchMove = useCallback((e: React.TouchEvent) => {
-    e.preventDefault();
-    const s = stateRef.current;
-    if (s.phase !== "playing") return;
-    const canvas = canvasRef.current!;
-    const rect = canvas.getBoundingClientRect();
-    const scaleX = CANVAS_W / rect.width;
-    const touch = e.touches[0];
-    s.touchX = (touch.clientX - rect.left) * scaleX;
-    s.player.x = Math.max(PLAYER_SIZE, Math.min(CANVAS_W - PLAYER_SIZE, s.touchX));
-    shoot(performance.now());
-  }, [shoot]);
-
-  const handleTouchEnd = useCallback(() => {
-    stateRef.current.touching = false;
-    stateRef.current.autoFire = false;
-  }, []);
-
-  // Mouse (desktop)
-  const handleMouseMove = useCallback((e: React.MouseEvent) => {
-    const s = stateRef.current;
-    if (s.phase !== "playing") return;
-    const canvas = canvasRef.current!;
-    const rect = canvas.getBoundingClientRect();
-    const scaleX = CANVAS_W / rect.width;
-    s.player.x = Math.max(PLAYER_SIZE, Math.min(CANVAS_W - PLAYER_SIZE, (e.clientX - rect.left) * scaleX));
-  }, []);
-
-  const handleClick = useCallback(() => {
-    const s = stateRef.current;
-    if (s.phase !== "playing") return;
-    shoot(performance.now());
-  }, [shoot]);
-
-  const startGame = useCallback(() => {
-    const s = stateRef.current;
-    s.phase = "playing";
-    s.player = { x: CANVAS_W / 2, hp: 100, maxHp: 100 };
-    s.bullets = [];
-    s.zombies = [];
-    s.particles = [];
-    s.floatingTexts = [];
-    s.wave = 1;
-    s.score = 0;
-    s.coins = 0;
-    s.kills = 0;
-    s.waveKills = 0;
-    s.waveTotal = 0;
-    s.waveActive = false;
-    s.lastShot = 0;
-    s.currentWeapon = 0;
-    s.weapons = WEAPONS.map(w => ({ ...w }));
-    s.unlockedWeapons = [0];
-    s.upgrades = { damage: 0, fireRate: 0, ammo: 0 };
-    startWave();
-    syncUI();
-  }, [startWave, syncUI]);
-
-  const openShop = useCallback(() => {
-    const s = stateRef.current;
-    if (s.phase !== "playing" || s.waveActive) return;
-    s.phase = "shop";
-    syncUI();
-  }, [syncUI]);
-
-  const closeShop = useCallback(() => {
-    const s = stateRef.current;
-    s.phase = "playing";
-    startWave();
-    syncUI();
-  }, [startWave, syncUI]);
-
-  const buyWeapon = useCallback((idx: number) => {
-    const s = stateRef.current;
-    const w = WEAPONS[idx];
-    if (s.coins >= w.upgradeCost && !s.unlockedWeapons.includes(idx)) {
-      s.coins -= w.upgradeCost;
-      s.unlockedWeapons.push(idx);
-      s.weapons[idx] = { ...w };
-      syncUI();
-    }
-  }, [syncUI]);
-
-  const selectWeapon = useCallback((idx: number) => {
-    const s = stateRef.current;
-    if (s.unlockedWeapons.includes(idx)) {
-      s.currentWeapon = idx;
-      syncUI();
-    }
-  }, [syncUI]);
-
-  const buyUpgrade = useCallback((type: "damage" | "fireRate" | "ammo") => {
-    const s = stateRef.current;
-    const costs = [100, 200, 350, 500];
-    const level = s.upgrades[type];
-    if (level >= 3) return;
-    const cost = costs[level];
-    if (s.coins >= cost) {
-      s.coins -= cost;
-      s.upgrades[type]++;
-      if (type === "ammo") {
-        for (const w of s.weapons) { w.maxAmmo = Math.round(w.maxAmmo * 1.25); w.ammo = w.maxAmmo; }
-      }
-      if (type === "fireRate") {
-        for (const w of s.weapons) { w.fireRate = Math.round(w.fireRate * 0.8); }
-      }
-      syncUI();
-    }
-  }, [syncUI]);
-
-  const { phase, hp, maxHp, ammo, maxAmmo, score, coins, wave, waveActive, waveKills, waveTotal, weaponName, weaponEmoji, kills, shopTab, unlockedWeapons, currentWeapon, upgrades } = uiState;
-
-  const upgradeLabels = { damage: "Урон", fireRate: "Скорострельность", ammo: "Магазин" };
-  const upgradeIcons = { damage: "⚔️", fireRate: "⚡", ammo: "🔋" };
+  const wantedStars = "★".repeat(hud.wantedLevel) + "☆".repeat(5 - hud.wantedLevel);
 
   return (
-    <div className="flex items-center justify-center min-h-screen bg-black">
-      <div style={{ width: CANVAS_W, maxWidth: "100vw", position: "relative", fontFamily: "Oswald, sans-serif" }}>
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", background: "#000", fontFamily: "'Montserrat', sans-serif" }}>
+      <div style={{ position: "relative", width: CW, maxWidth: "100vw" }}>
 
-        {/* Canvas */}
         <canvas
           ref={canvasRef}
-          width={CANVAS_W}
-          height={CANVAS_H}
-          style={{ display: "block", width: "100%", touchAction: "none", cursor: phase === "playing" ? "crosshair" : "default" }}
+          width={CW} height={CH}
+          style={{ display: "block", width: "100%", touchAction: "none", cursor: screen === "playing" ? "crosshair" : "default" }}
           onTouchStart={handleTouchStart}
           onTouchMove={handleTouchMove}
           onTouchEnd={handleTouchEnd}
-          onMouseMove={handleMouseMove}
-          onClick={handleClick}
         />
 
-        {/* HUD — Playing */}
-        {phase === "playing" && (
+        {/* HUD */}
+        {screen === "playing" && (
           <>
-            {/* Top bar */}
-            <div style={{ position: "absolute", top: 10, left: 10, right: 10, pointerEvents: "none" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-                {/* HP */}
-                <div style={{ flex: 1, marginRight: 10 }}>
-                  <div style={{ fontSize: 11, color: "#FF4444", letterSpacing: 2, marginBottom: 2 }}>
-                    ❤️ {Math.ceil(hp)} / {maxHp}
-                  </div>
-                  <div style={{ height: 8, background: "rgba(0,0,0,0.5)", borderRadius: 4, overflow: "hidden", border: "1px solid rgba(255,0,0,0.3)" }}>
-                    <div style={{ height: "100%", width: `${(hp / maxHp) * 100}%`, background: hp > 60 ? "#00FF44" : hp > 30 ? "#FFAA00" : "#FF2200", borderRadius: 4, transition: "width 0.1s" }} />
+            <div style={{ position: "absolute", top: 12, left: 12, right: 12, pointerEvents: "none" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                <div style={{ flex: 1, marginRight: 12 }}>
+                  <div style={{ fontSize: 10, color: "#ff4444", letterSpacing: 3, marginBottom: 3, fontFamily: "'IBM Plex Mono'" }}>HP {Math.ceil(hud.hp)}/{hud.maxHp}</div>
+                  <div style={{ height: 6, background: "rgba(0,0,0,0.6)", borderRadius: 3, overflow: "hidden", border: "1px solid rgba(255,0,0,0.3)" }}>
+                    <div style={{ height: "100%", width: `${Math.max(0, (hud.hp / hud.maxHp) * 100)}%`, background: hud.hp > 60 ? "#00ff88" : hud.hp > 30 ? "#ffaa00" : "#ff2200", borderRadius: 3, transition: "width 0.1s" }} />
                   </div>
                 </div>
-                {/* Score */}
                 <div style={{ textAlign: "right" }}>
-                  <div style={{ fontSize: 18, color: "#FFD700", fontWeight: 700 }}>⭐ {score}</div>
-                  <div style={{ fontSize: 12, color: "#AAFFAA" }}>🪙 {coins}</div>
+                  <div style={{ fontSize: 14, color: "#ffcc00", letterSpacing: 1, fontFamily: "'Bebas Neue'" }}>{wantedStars}</div>
+                  <div style={{ fontSize: 10, color: "#aaa", fontFamily: "'IBM Plex Mono'" }}>WAVE {hud.wave}</div>
                 </div>
               </div>
-              {/* Wave */}
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <div style={{ fontSize: 13, color: "#FF8800", letterSpacing: 1 }}>
-                  ВОЛНА {wave} {waveActive ? `• Зомби: ${waveTotal - waveKills}` : ""}
-                </div>
-                {waveActive && (
-                  <div style={{ height: 4, flex: 1, marginLeft: 10, background: "rgba(0,0,0,0.5)", borderRadius: 2, overflow: "hidden" }}>
-                    <div style={{ height: "100%", width: `${(waveKills / waveTotal) * 100}%`, background: "#FF6600", borderRadius: 2, transition: "width 0.2s" }} />
-                  </div>
-                )}
+              <div style={{ display: "flex", gap: 16, marginTop: 6 }}>
+                <div style={{ fontSize: 13, color: "#ffcc00", fontFamily: "'Bebas Neue'", letterSpacing: 1 }}>${hud.money}</div>
+                <div style={{ fontSize: 13, color: "#ff4444", fontFamily: "'Bebas Neue'", letterSpacing: 1 }}>☠ {hud.kills}</div>
               </div>
             </div>
 
-            {/* Ammo + Weapon (bottom left) */}
-            <div style={{ position: "absolute", bottom: 20, left: 10, pointerEvents: "none" }}>
-              <div style={{ fontSize: 14, color: "#FFFFFF", marginBottom: 2 }}>{weaponEmoji} {weaponName}</div>
-              <div style={{ display: "flex", gap: 2, flexWrap: "wrap", maxWidth: 150 }}>
-                {Array.from({ length: maxAmmo }).map((_, i) => (
-                  <div key={i} style={{ width: 6, height: 14, borderRadius: 2, background: i < ammo ? "#FFD700" : "rgba(255,255,255,0.15)" }} />
-                ))}
+            <div style={{ position: "absolute", bottom: 80, left: 12, pointerEvents: "none" }}>
+              <div style={{ fontSize: 12, color: "#fff", fontFamily: "'IBM Plex Mono'", marginBottom: 4 }}>
+                {hud.weapon === "knife" ? "🔪 НОЖ" : `🔫 ${hud.ammo}/${hud.maxAmmo}`}
               </div>
+              {hud.weapon === "gun" && hud.reloading && <div style={{ fontSize: 10, color: "#ffaa00", fontFamily: "'IBM Plex Mono'" }}>ПЕРЕЗАРЯДКА...</div>}
+              {hud.weapon === "gun" && !hud.reloading && (
+                <div style={{ display: "flex", gap: 3 }}>
+                  {Array.from({ length: hud.maxAmmo }).map((_, i) => (
+                    <div key={i} style={{ width: 5, height: 14, borderRadius: 2, background: i < hud.ammo ? "#ff4400" : "rgba(255,255,255,0.1)" }} />
+                  ))}
+                </div>
+              )}
             </div>
 
-            {/* Shop button (bottom right) — only between waves */}
-            {!waveActive && (
-              <button
-                onClick={openShop}
-                style={{ position: "absolute", bottom: 20, right: 10, background: "linear-gradient(135deg, #1a4a1a, #2a7a2a)", border: "2px solid #44FF44", borderRadius: 12, padding: "10px 16px", color: "#AAFFAA", fontSize: 14, fontFamily: "Oswald", letterSpacing: 1, cursor: "pointer" }}
+            {/* Mobile buttons */}
+            <div style={{ position: "absolute", bottom: 12, left: 0, right: 0, display: "flex", justifyContent: "space-between", padding: "0 16px" }}>
+              <div style={{ width: 72, height: 72, borderRadius: "50%", border: "2px solid rgba(255,255,255,0.1)", background: "rgba(255,255,255,0.03)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <span style={{ fontSize: 10, color: "rgba(255,255,255,0.25)", fontFamily: "'IBM Plex Mono'", textAlign: "center" }}>MOVE</span>
+              </div>
+              <div
+                onPointerDown={(e) => { e.preventDefault(); playerAttack(); }}
+                style={{ width: 72, height: 72, borderRadius: "50%", border: "2px solid rgba(255,60,0,0.5)", background: "rgba(255,60,0,0.1)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}
               >
-                🛒 МАГАЗИН
-              </button>
-            )}
-
-            {/* Kills */}
-            <div style={{ position: "absolute", bottom: 20, left: "50%", transform: "translateX(-50%)", pointerEvents: "none" }}>
-              <div style={{ fontSize: 12, color: "#FF6666", textAlign: "center" }}>☠️ {kills}</div>
+                <span style={{ fontSize: 10, color: "rgba(255,100,0,0.7)", fontFamily: "'IBM Plex Mono'" }}>ATK</span>
+              </div>
             </div>
 
-            {/* Hint touch */}
-            {!waveActive && (
-              <div style={{ position: "absolute", top: "45%", left: 0, right: 0, textAlign: "center", pointerEvents: "none" }}>
-                <div style={{ fontSize: 18, color: "#FFFFFF", textShadow: "0 0 20px #00FF88", animation: "pulse 1.5s infinite" }}>
-                  Волна {wave} начнётся сейчас...
-                </div>
+            {/* Weapon switch hint */}
+            <div style={{ position: "absolute", bottom: 36, left: "50%", transform: "translateX(-50%)", pointerEvents: "none" }}>
+              <div
+                onPointerDown={(e) => { e.preventDefault(); const g = G.current; if (g.player) g.player.weapon = g.player.weapon === "knife" ? "gun" : "knife"; }}
+                style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", fontFamily: "'IBM Plex Mono'", pointerEvents: "all", cursor: "pointer", padding: "4px 10px", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 6 }}
+              >
+                Q — сменить оружие
               </div>
-            )}
+            </div>
           </>
         )}
 
         {/* MENU */}
-        {phase === "menu" && (
-          <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.85)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
-            <div style={{ textAlign: "center", padding: 30 }}>
-              <div style={{ fontSize: 13, color: "#FF4444", letterSpacing: 8, marginBottom: 8 }}>☣ МОСКВА ☣</div>
-              <div style={{ fontSize: 44, fontWeight: 700, color: "#FFFFFF", lineHeight: 1, textShadow: "0 0 30px #FF0000", letterSpacing: 3 }}>МЕРТВА</div>
-              <div style={{ fontSize: 13, color: "#888", marginTop: 8, letterSpacing: 3 }}>ЗОМБИ АПОКАЛИПСИС</div>
-
-              <div style={{ marginTop: 40, marginBottom: 30, padding: "20px 0", borderTop: "1px solid rgba(255,0,0,0.2)", borderBottom: "1px solid rgba(255,0,0,0.2)" }}>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16, textAlign: "center" }}>
-                  {[{ icon: "🌊", label: "Волны врагов" }, { icon: "🔫", label: "3 вида оружия" }, { icon: "⬆️", label: "Апгрейды" }].map(f => (
-                    <div key={f.label}>
-                      <div style={{ fontSize: 28 }}>{f.icon}</div>
-                      <div style={{ fontSize: 11, color: "#AAAAAA", marginTop: 4 }}>{f.label}</div>
-                    </div>
-                  ))}
-                </div>
+        {screen === "menu" && (
+          <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,8,0.93)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+            <div style={{ textAlign: "center", padding: "0 30px", position: "relative", zIndex: 1 }}>
+              <div style={{ fontSize: 11, letterSpacing: 6, color: "#ff4444", fontFamily: "'IBM Plex Mono'", marginBottom: 16 }}>НУАР · ЭКШН</div>
+              <div style={{ fontFamily: "'Bebas Neue'", fontSize: 62, lineHeight: 0.9, color: "#fff", textShadow: "0 0 40px rgba(255,0,0,0.6)", letterSpacing: 4 }}>
+                НОЧНОЙ<br /><span style={{ color: "#ff2200" }}>БЕГЛЕЦ</span>
               </div>
-
+              <div style={{ width: 80, height: 2, background: "linear-gradient(90deg, transparent, #ff2200, transparent)", margin: "16px auto" }} />
+              <div style={{ fontSize: 13, color: "#666", fontFamily: "'Montserrat'", fontWeight: 300, marginBottom: 36, letterSpacing: 0.5, lineHeight: 1.8 }}>
+                Киллер. Засвечен. Полиция на хвосте.<br />
+                <span style={{ color: "#888" }}>Единственный выход — устранить всех.</span>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 36 }}>
+                {[{ e: "🔪", t: "Нож" }, { e: "🔫", t: "Пистолет" }, { e: "🌊", t: "Волны" }].map(f => (
+                  <div key={f.t} style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 10, padding: "14px 8px" }}>
+                    <div style={{ fontSize: 26, marginBottom: 4 }}>{f.e}</div>
+                    <div style={{ fontSize: 11, color: "#777", fontFamily: "'IBM Plex Mono'" }}>{f.t}</div>
+                  </div>
+                ))}
+              </div>
               <button
                 onClick={startGame}
-                style={{ background: "linear-gradient(135deg, #8B0000, #CC0000)", border: "2px solid #FF4444", borderRadius: 16, padding: "16px 48px", color: "#FFFFFF", fontSize: 22, fontFamily: "Oswald", letterSpacing: 3, cursor: "pointer", boxShadow: "0 0 30px rgba(255,0,0,0.4)", width: "100%" }}
+                style={{ width: "100%", padding: "16px", background: "linear-gradient(135deg, #8B0000, #ff2200)", border: "none", borderRadius: 12, color: "#fff", fontSize: 22, fontFamily: "'Bebas Neue'", letterSpacing: 5, cursor: "pointer", boxShadow: "0 0 40px rgba(255,0,0,0.35)" }}
               >
-                ▶ НАЧАТЬ
+                НАЧАТЬ ПОБЕГ
               </button>
-
-              <div style={{ marginTop: 16, fontSize: 12, color: "#555" }}>
-                Тапни по экрану чтобы стрелять • Двигай пальцем чтобы идти
+              <div style={{ marginTop: 18, fontSize: 10, color: "#333", fontFamily: "'IBM Plex Mono'", lineHeight: 2.2 }}>
+                WASD — движение &nbsp;|&nbsp; E / SPACE — атака<br />
+                Q — смена оружия &nbsp;|&nbsp; R — перезарядка<br />
+                МОБИЛЬНЫЙ: тап слева — движение, справа — атака
               </div>
             </div>
           </div>
         )}
 
         {/* GAME OVER */}
-        {phase === "gameover" && (
-          <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.9)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
-            <div style={{ textAlign: "center", padding: 30 }}>
-              <div style={{ fontSize: 60, marginBottom: 10 }}>💀</div>
-              <div style={{ fontSize: 38, fontWeight: 700, color: "#FF2200", letterSpacing: 3, textShadow: "0 0 20px #FF0000" }}>ВЫ ПАЛИ</div>
-              <div style={{ fontSize: 14, color: "#888", marginTop: 4 }}>Москва поглощена тьмой</div>
-
-              <div style={{ marginTop: 30, marginBottom: 30, background: "rgba(255,0,0,0.05)", border: "1px solid rgba(255,0,0,0.2)", borderRadius: 16, padding: "20px 40px" }}>
-                <div style={{ fontSize: 36, color: "#FFD700", fontWeight: 700 }}>⭐ {score}</div>
-                <div style={{ color: "#888", fontSize: 12, marginTop: 4 }}>ОЧКОВ</div>
-                <div style={{ display: "flex", gap: 30, marginTop: 16, justifyContent: "center" }}>
-                  <div><div style={{ fontSize: 22, color: "#FF6666" }}>☠️ {kills}</div><div style={{ fontSize: 11, color: "#666" }}>Убито</div></div>
-                  <div><div style={{ fontSize: 22, color: "#FF8800" }}>🌊 {wave}</div><div style={{ fontSize: 11, color: "#666" }}>Волна</div></div>
+        {screen === "dead" && (
+          <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.93)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+            <div style={{ textAlign: "center", padding: "0 30px" }}>
+              <div style={{ fontSize: 72, marginBottom: 8 }}>💀</div>
+              <div style={{ fontFamily: "'Bebas Neue'", fontSize: 52, color: "#ff2200", letterSpacing: 4, textShadow: "0 0 30px rgba(255,0,0,0.7)" }}>ПОЙМАН</div>
+              <div style={{ fontSize: 12, color: "#444", fontFamily: "'IBM Plex Mono'", marginBottom: 28 }}>конец побега</div>
+              <div style={{ background: "rgba(255,0,0,0.05)", border: "1px solid rgba(255,0,0,0.12)", borderRadius: 16, padding: "24px 36px", marginBottom: 28 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
+                  {[{ v: `☠ ${hud.kills}`, l: "уничтожено" }, { v: `$${hud.money}`, l: "заработано" }, { v: `W${hud.wave}`, l: "волна" }, { v: wantedStars, l: "розыск" }].map(s => (
+                    <div key={s.l}>
+                      <div style={{ fontSize: 28, color: "#ffcc00", fontFamily: "'Bebas Neue'" }}>{s.v}</div>
+                      <div style={{ fontSize: 10, color: "#444", fontFamily: "'IBM Plex Mono'" }}>{s.l}</div>
+                    </div>
+                  ))}
                 </div>
               </div>
-
               <button
                 onClick={startGame}
-                style={{ background: "linear-gradient(135deg, #8B0000, #CC0000)", border: "2px solid #FF4444", borderRadius: 16, padding: "14px 40px", color: "#FFFFFF", fontSize: 20, fontFamily: "Oswald", letterSpacing: 3, cursor: "pointer", width: "100%" }}
+                style={{ width: "100%", padding: "14px", background: "linear-gradient(135deg, #8B0000, #ff2200)", border: "none", borderRadius: 12, color: "#fff", fontSize: 20, fontFamily: "'Bebas Neue'", letterSpacing: 4, cursor: "pointer", boxShadow: "0 0 28px rgba(255,0,0,0.3)" }}
               >
-                🔄 СНОВА
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* SHOP */}
-        {phase === "shop" && (
-          <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.95)", display: "flex", flexDirection: "column" }}>
-            <div style={{ padding: "20px 16px 10px", borderBottom: "1px solid rgba(255,255,255,0.1)" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <div style={{ fontSize: 22, fontWeight: 700, color: "#FFFFFF", letterSpacing: 2 }}>🛒 МАГАЗИН</div>
-                <div style={{ fontSize: 16, color: "#FFD700" }}>🪙 {coins}</div>
-              </div>
-              <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-                {(["weapons", "upgrades"] as const).map(tab => (
-                  <button
-                    key={tab}
-                    onClick={() => { stateRef.current.shopTab = tab; syncUI(); }}
-                    style={{ flex: 1, padding: "8px", borderRadius: 8, border: "none", cursor: "pointer", fontFamily: "Oswald", fontSize: 13, letterSpacing: 1, background: shopTab === tab ? "rgba(255,100,0,0.8)" : "rgba(255,255,255,0.08)", color: shopTab === tab ? "#FFFFFF" : "#888" }}
-                  >
-                    {tab === "weapons" ? "⚔️ ОРУЖИЕ" : "⬆️ АПГРЕЙДЫ"}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div style={{ flex: 1, overflowY: "auto", padding: "12px 16px" }}>
-              {shopTab === "weapons" ? (
-                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                  {WEAPONS.map((w, idx) => {
-                    const unlocked = unlockedWeapons.includes(idx);
-                    const selected = currentWeapon === idx;
-                    const canBuy = coins >= w.upgradeCost && !unlocked;
-                    return (
-                      <div
-                        key={w.id}
-                        onClick={() => unlocked ? selectWeapon(idx) : (canBuy ? buyWeapon(idx) : null)}
-                        style={{ background: selected ? "rgba(0,200,100,0.15)" : "rgba(255,255,255,0.04)", border: `1px solid ${selected ? "#00FF88" : unlocked ? "rgba(255,255,255,0.15)" : "rgba(255,100,0,0.3)"}`, borderRadius: 14, padding: "14px 16px", cursor: unlocked || canBuy ? "pointer" : "default", opacity: !unlocked && !canBuy ? 0.5 : 1 }}
-                      >
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                          <div>
-                            <div style={{ fontSize: 20 }}>{w.emoji} <span style={{ fontSize: 16, color: "#FFFFFF", fontWeight: 600 }}>{w.name}</span></div>
-                            <div style={{ fontSize: 11, color: "#888", marginTop: 4 }}>
-                              Урон: {w.damage} • Скорость: {w.fireRate}мс • Патроны: {w.maxAmmo}
-                            </div>
-                            {w.pellets > 1 && <div style={{ fontSize: 11, color: "#FF8800" }}>Дробь: {w.pellets} снарядов</div>}
-                          </div>
-                          <div style={{ textAlign: "right" }}>
-                            {unlocked ? (
-                              <div style={{ fontSize: 12, color: selected ? "#00FF88" : "#888", fontWeight: 600 }}>
-                                {selected ? "✓ ВЫБРАНО" : "ВЫБРАТЬ"}
-                              </div>
-                            ) : (
-                              <div style={{ fontSize: 14, color: canBuy ? "#FFD700" : "#666" }}>🪙 {w.upgradeCost}</div>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              ) : (
-                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                  {(["damage", "fireRate", "ammo"] as const).map(type => {
-                    const costs = [100, 200, 350, 500];
-                    const level = upgrades[type];
-                    const maxLevel = 3;
-                    const cost = level < maxLevel ? costs[level] : 0;
-                    const canBuy = coins >= cost && level < maxLevel;
-                    return (
-                      <div key={type} style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 14, padding: "14px 16px" }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                          <div>
-                            <div style={{ fontSize: 16, color: "#FFFFFF" }}>{upgradeIcons[type]} {upgradeLabels[type]}</div>
-                            <div style={{ fontSize: 11, color: "#888", marginTop: 2 }}>
-                              {type === "damage" ? "+20% урона за уровень" : type === "fireRate" ? "-20% задержки за уровень" : "+25% патронов за уровень"}
-                            </div>
-                          </div>
-                          {level < maxLevel ? (
-                            <button
-                              onClick={() => buyUpgrade(type)}
-                              disabled={!canBuy}
-                              style={{ background: canBuy ? "linear-gradient(135deg, #1a4a1a, #2a7a2a)" : "rgba(255,255,255,0.05)", border: `1px solid ${canBuy ? "#44FF44" : "#333"}`, borderRadius: 10, padding: "8px 14px", color: canBuy ? "#AAFFAA" : "#555", fontSize: 13, fontFamily: "Oswald", cursor: canBuy ? "pointer" : "default" }}
-                            >
-                              🪙 {cost}
-                            </button>
-                          ) : (
-                            <div style={{ fontSize: 12, color: "#FFD700" }}>МАКС ✓</div>
-                          )}
-                        </div>
-                        <div style={{ display: "flex", gap: 4 }}>
-                          {Array.from({ length: maxLevel }).map((_, i) => (
-                            <div key={i} style={{ flex: 1, height: 6, borderRadius: 3, background: i < level ? "#FFD700" : "rgba(255,255,255,0.1)" }} />
-                          ))}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-
-            <div style={{ padding: "12px 16px", borderTop: "1px solid rgba(255,255,255,0.1)" }}>
-              <button
-                onClick={closeShop}
-                style={{ width: "100%", background: "linear-gradient(135deg, #8B0000, #CC0000)", border: "2px solid #FF4444", borderRadius: 14, padding: "14px", color: "#FFFFFF", fontSize: 18, fontFamily: "Oswald", letterSpacing: 2, cursor: "pointer" }}
-              >
-                ⚔️ В БОЙ — ВОЛНА {wave}
+                🔄 СНОВА В БЕГСТВО
               </button>
             </div>
           </div>
         )}
       </div>
-
-      <style>{`
-        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
-      `}</style>
     </div>
   );
 }
